@@ -7,6 +7,7 @@ import tifffile
 import imagecodecs._imcd
 import glob
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class TiffRectangleSelector:
     def __init__(self, image_path):
@@ -334,8 +335,38 @@ def get_image_path_list(target_dir_path = None):
         os.getcwd()
     return sorted(glob.glob("*.tif", root_dir = target_dir_path))
 
+def crop_and_save(target_dir_path, rectangles, fname):
+    try:   
+        tiff = tifffile.imread(os.path.join(target_dir_path, fname))
+        crop_tiff = None
+
+        start, end = rectangles        
+        # 座標を正規化（左上と右下を確定）
+        x1, y1 = min(start[0], end[0]), min(start[1], end[1])
+        x2, y2 = max(start[0], end[0]), max(start[1], end[1])
+        
+        # 境界チェック
+        height, width = tiff.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(width, x2), min(height, y2)
+    
+        # 領域を切り出し
+        if len(tiff.shape) == 3:
+            crop_tiff = tiff[y1:y2, x1:x2, :]
+        else:
+            crop_tiff = tiff[y1:y2, x1:x2]
+
+        if crop_tiff is None:
+            print(f"Error {os.path.join(target_dir_path, fname)}")
+        
+        tifffile.imwrite(os.path.join(target_dir_path, "crop_result", fname), crop_tiff)
+    except Exception as e:
+        error_log = f"Error: {fname}\n"
+        error_log += f"=> {e}\n"
+        return error_log
+    return ""
+
 def main():
-    error_flag = False
     target_dir_path = filedialog.askdirectory(
         initialdir = os.getcwd(),
         title = "TIFF 読み込みフォルダ選択",
@@ -360,43 +391,33 @@ def main():
         os.makedirs(os.path.join(target_dir_path, "crop_result"), exist_ok=True)
         print(f"保存先：{os.path.join(target_dir_path, 'crop_result')}")
 
-        for fname in tqdm(tif_list, desc="Cropping", ncols=80, colour='green'): 
-            try:   
-                tiff = tifffile.imread(os.path.join(target_dir_path, fname))
-                crop_tiff = None
+        error_log = ""
 
-                start, end = rectangles        
-                # 座標を正規化（左上と右下を確定）
-                x1, y1 = min(start[0], end[0]), min(start[1], end[1])
-                x2, y2 = max(start[0], end[0]), max(start[1], end[1])
-                
-                # 境界チェック
-                height, width = tiff.shape[:2]
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(width, x2), min(height, y2)
-            
-                # 領域を切り出し
-                if len(tiff.shape) == 3:
-                    crop_tiff = tiff[y1:y2, x1:x2, :]
-                else:
-                    crop_tiff = tiff[y1:y2, x1:x2]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # 全てのタスクを一度にサブミット
+            future_to_fname = {
+                executor.submit(crop_and_save, target_dir_path, rectangles, fname): fname 
+                for fname in tif_list
+            }
 
-                if crop_tiff is None:
-                    print(f"Error {os.path.join(target_dir_path, fname)}")
-                    continue
-                
-                tifffile.imwrite(os.path.join(target_dir_path, "crop_result", fname), crop_tiff)
-            except Exception as e:
-                print(f"Error: {fname}")
-                print(f"=> {e}")
-                error_flag = True
+            # 完了したタスクから順番に結果を取得
+            with tqdm(total=len(tif_list), desc="Cropping", ncols=80, colour='green') as pbar:
+                for future in as_completed(future_to_fname):
+                    fname = future_to_fname[future]
+                    try:
+                        error_log += future.result()
+                    except Exception as e:
+                        print(f"Unexpected error for {fname}: {e}")
+                    finally:
+                        pbar.update(1)
+
+        if not error_log == "":
+            print(error_log)
+            print("終了するには何かキーを押してください。")
+            input()
             
     except ValueError as e:
         print(f"エラー: {e}")
-        print("終了するには何かキーを押してください。")
-        input()
-
-    if error_flag:
         print("終了するには何かキーを押してください。")
         input()
 
